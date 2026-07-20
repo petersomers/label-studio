@@ -1,6 +1,38 @@
 import { render } from "@testing-library/react";
+import Hls from "hls.js";
 import fetchMock from "jest-fetch-mock";
 import * as VirtualVideo from "../VirtualVideo";
+
+describe("isHlsUrl", () => {
+  it("detects .m3u8 playlists, including ones with query params", () => {
+    expect(VirtualVideo.isHlsUrl("https://example.com/stream/index.m3u8")).toBe(true);
+    expect(VirtualVideo.isHlsUrl("https://example.com/stream/index.m3u8?token=abc123")).toBe(true);
+    expect(VirtualVideo.isHlsUrl("/local/playlist.m3u")).toBe(true);
+  });
+
+  it("returns false for non-HLS urls", () => {
+    expect(VirtualVideo.isHlsUrl("https://example.com/video.mp4")).toBe(false);
+    expect(VirtualVideo.isHlsUrl("https://example.com/video.webm")).toBe(false);
+  });
+});
+
+describe("canPlayUrl for HLS", () => {
+  it("reports HLS playlists as playable when hls.js is supported", async () => {
+    const spy = jest.spyOn(Hls, "isSupported").mockReturnValue(true);
+
+    await expect(VirtualVideo.canPlayUrl("https://example.com/stream/index.m3u8")).resolves.toBe(true);
+
+    spy.mockRestore();
+  });
+
+  it("reports HLS playlists as unplayable when neither native HLS nor hls.js is available", async () => {
+    const spy = jest.spyOn(Hls, "isSupported").mockReturnValue(false);
+
+    await expect(VirtualVideo.canPlayUrl("https://example.com/stream/index.m3u8")).resolves.toBe(false);
+
+    spy.mockRestore();
+  });
+});
 
 describe("VirtualVideo", () => {
   it("should call canPlayUrl and return false if no url specified", async () => {
