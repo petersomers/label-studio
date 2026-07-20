@@ -1,3 +1,4 @@
+import Hls from "hls.js";
 import { type DetailedHTMLProps, forwardRef, useCallback, useEffect, useRef, type VideoHTMLAttributes } from "react";
 import InfoModal from "../../components/Infomodal/Infomodal";
 import { patchPlayPauseMethods } from "../../utils/patchPlayPauseMethods";
@@ -39,28 +40,69 @@ const isBinary = (mimeType: string | null | undefined) => {
   return mimeType.includes("octet-stream");
 };
 
+// HLS manifests are served with one of these mime types.
+const isHlsMimeType = (mimeType: string | null | undefined) => !!mimeType && mimeType.toLowerCase().includes("mpegurl");
+
+const getPathname = (url: string) =>
+  new URL(url, /^https?/.exec(url) ? undefined : window.location.href).pathname;
+
+// True when the URL points at an HLS playlist (`.m3u8`/`.m3u`).
+export const isHlsUrl = (url: string) => {
+  try {
+    const ext = getPathname(url).split(".").pop()?.toLowerCase();
+    return ext === "m3u8" || ext === "m3u";
+  } catch {
+    return false;
+  }
+};
+
+// Safari (and iOS) can play HLS directly through the <video> element.
+export const canPlayNativeHls = () => {
+  const video = document.createElement("video");
+  return video.canPlayType("application/vnd.apple.mpegurl") !== "" || video.canPlayType("application/x-mpegURL") !== "";
+};
+
+// HLS can be played either natively (Safari) or via hls.js over Media Source Extensions (Chrome, Firefox).
+const canPlayHls = () => canPlayNativeHls() || Hls.isSupported();
+
+// True when we should stream through hls.js rather than handing the URL to the <video> element directly.
+export const shouldUseHlsJs = (url: string) => isHlsUrl(url) && !canPlayNativeHls() && Hls.isSupported();
+
 export const canPlayUrl = async (url: string) => {
   const video = document.createElement("video");
 
-  const pathName = new URL(url, /^https?/.exec(url) ? undefined : window.location.href).pathname;
+  const pathName = getPathname(url);
 
   const fileType = (pathName.split(".").pop() ?? "") as keyof typeof mimeTypeMapping;
 
-  let fileMimeType: string | null | undefined = mimeTypeMapping[fileType];
+  let supported: boolean;
 
-  if (!fileMimeType) {
-    const fileMeta = await fetch(url, {
-      method: "GET",
-      headers: {
-        Range: "bytes=0-0",
-      },
-    });
+  if (fileType === "m3u8" || fileType === "m3u") {
+    // HLS playlists don't map to a mime type the <video> element understands, so check for HLS support directly.
+    supported = canPlayHls();
+  } else {
+    let fileMimeType: string | null | undefined = mimeTypeMapping[fileType];
 
-    fileMimeType = fileMeta.headers.get("content-type");
+    if (!fileMimeType) {
+      const fileMeta = await fetch(url, {
+        method: "GET",
+        headers: {
+          Range: "bytes=0-0",
+        },
+      });
+
+      fileMimeType = fileMeta.headers.get("content-type");
+    }
+
+    if (isHlsMimeType(fileMimeType)) {
+      // HLS manifest served without a recognizable extension (e.g. a signed URL).
+      supported = canPlayHls();
+    } else {
+      // If the file is binary, we can't check if the browser can play it, so we just assume it can.
+      supported = isBinary(fileMimeType) || (!!fileMimeType && video.canPlayType(fileMimeType) !== "");
+    }
   }
 
-  // If the file is binary, we can't check if the browser can play it, so we just assume it can.
-  const supported = isBinary(fileMimeType) || (!!fileMimeType && video.canPlayType(fileMimeType) !== "");
   const modalExists = document.querySelector(".ant-modal");
 
   if (!supported && !modalExists)
@@ -71,6 +113,7 @@ export const canPlayUrl = async (url: string) => {
 export const VirtualVideo = forwardRef<HTMLVideoElement, VirtualVideoProps>((props, ref) => {
   const video = useRef<HTMLVideoElement | null>(null);
   const source = useRef<HTMLSourceElement | null>(null);
+  const hls = useRef<Hls | null>(null);
   const attachedEvents = useRef<[string, any][]>([]);
 
   const canPlayType = useCallback(
@@ -156,6 +199,10 @@ export const VirtualVideo = forwardRef<HTMLVideoElement, VirtualVideoProps>((pro
   };
 
   const unloadSource = () => {
+    if (hls.current) {
+      hls.current.destroy();
+      hls.current = null;
+    }
     if (source && video) {
       video.current?.pause();
       source.current?.setAttribute("src", "");
@@ -168,11 +215,25 @@ export const VirtualVideo = forwardRef<HTMLVideoElement, VirtualVideoProps>((pro
 
     video.current?.pause();
 
-    if (source.current) unloadSource();
+    if (source.current || hls.current) unloadSource();
+
+    const src = props.src ?? "";
+
+    // For HLS streams in browsers without native support (Chrome, Firefox), stream through hls.js.
+    // hls.js pulls the media over Media Source Extensions and keeps only a rolling buffer window,
+    // so playback can start immediately instead of downloading the whole video up front.
+    if (src && shouldUseHlsJs(src)) {
+      const hlsInstance = new Hls();
+
+      hlsInstance.loadSource(src);
+      hlsInstance.attachMedia(video.current);
+      hls.current = hlsInstance;
+      return;
+    }
 
     const sourceEl = document.createElement("source");
 
-    sourceEl.setAttribute("src", props.src ?? "");
+    sourceEl.setAttribute("src", src);
     video.current?.appendChild(sourceEl);
 
     source.current = sourceEl;

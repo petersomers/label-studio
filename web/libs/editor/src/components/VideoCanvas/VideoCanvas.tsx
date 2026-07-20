@@ -565,7 +565,10 @@ export const VideoCanvas = memo(
           return;
         }
 
-        if (videoRef.current?.readyState === 4) {
+        // HAVE_CURRENT_DATA (2): metadata (duration, dimensions) is known and the first frame is
+        // decodable. Waiting for HAVE_ENOUGH_DATA (4) would force the browser to buffer far ahead
+        // before playback can begin, which is wasteful for streamed sources like HLS.
+        if ((videoRef.current?.readyState ?? 0) >= HTMLMediaElement.HAVE_CURRENT_DATA) {
           isLoaded = true;
           const video = videoRef.current;
 
